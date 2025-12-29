@@ -1,5 +1,9 @@
 # Book Indexer
 
+[![PyPI version](https://img.shields.io/pypi/v/book-indexer.svg)](https://pypi.org/project/book-indexer/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+
 CLI tool to index books and PDFs into ChromaDB for semantic search. Built for use with Claude Code agents.
 
 ## Features
