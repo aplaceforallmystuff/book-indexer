@@ -430,5 +430,236 @@ def calibre_sync(
         raise click.Abort()
 
 
+# ============================================================================
+# BookLore Integration Commands
+# ============================================================================
+
+def _booklore_library(host, port, user, password, mount_map):
+    """Create BookLoreLibrary with lazy import (only needed when pymysql is installed)."""
+    from .booklore import BookLoreLibrary
+    kwargs = {
+        "host": host, "port": port, "user": user,
+        "password": password, "database": "booklore",
+    }
+    if mount_map:
+        import json
+        kwargs["mount_map"] = json.loads(mount_map)
+    return BookLoreLibrary(**kwargs)
+
+
+# Shared options for all booklore commands
+def booklore_options(f):
+    """Common BookLore connection options."""
+    f = click.option('--db-host', default='127.0.0.1', help='MariaDB host')(f)
+    f = click.option('--db-port', default=3307, type=int, help='MariaDB port')(f)
+    f = click.option('--db-user', default='booklore', help='MariaDB user')(f)
+    f = click.option('--db-password', default='', help='MariaDB password (or set BOOKLORE_DB_PASSWORD env var)')(f)
+    f = click.option('--mount-map', default=None, help='JSON mount map e.g. \'{\"/books\": \"/home/user/calibre\"}\'')(f)
+    return f
+
+
+def _get_bl_password(db_password):
+    """Get password from arg or environment."""
+    return db_password or os.environ.get("BOOKLORE_DB_PASSWORD", "")
+
+
+@main.command('booklore-stats')
+@booklore_options
+def booklore_stats(db_host, db_port, db_user, db_password, mount_map):
+    """
+    Show BookLore library statistics.
+
+    Example:
+        book-indexer booklore-stats
+    """
+    try:
+        bl = _booklore_library(db_host, db_port, db_user, _get_bl_password(db_password), mount_map)
+        stats = bl.get_library_stats()
+
+        console.print("\n[bold cyan]BookLore Library Statistics[/bold cyan]\n")
+        console.print(f"  Books:     [green]{stats['total_books']:,}[/green]")
+        console.print(f"  Authors:   [green]{stats['total_authors']:,}[/green]")
+        console.print(f"  Tags:      [green]{stats['total_tags']:,}[/green]")
+        console.print(f"  Formats:   [green]{stats['total_formats']}[/green]")
+        console.print(f"  Libraries: [green]{stats['total_libraries']}[/green]")
+        console.print(f"\n  Host: [dim]{db_host}:{db_port}[/dim]\n")
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise click.Abort()
+
+
+@main.command('booklore-tags')
+@booklore_options
+@click.option('--min-books', default=1, type=int, help='Only show tags with at least N books')
+def booklore_tags(db_host, db_port, db_user, db_password, mount_map, min_books):
+    """
+    List all BookLore tags with book counts.
+
+    Example:
+        book-indexer booklore-tags
+        book-indexer booklore-tags --min-books 5
+    """
+    try:
+        bl = _booklore_library(db_host, db_port, db_user, _get_bl_password(db_password), mount_map)
+        tags = bl.get_all_tags()
+
+        tags = [t for t in tags if t['book_count'] >= min_books]
+
+        if not tags:
+            console.print("[yellow]No tags found matching criteria[/yellow]")
+            return
+
+        table = Table(title=f"BookLore Tags ({len(tags)} total)")
+        table.add_column("Tag", style="cyan")
+        table.add_column("Books", justify="right", style="green")
+
+        for tag in sorted(tags, key=lambda x: x['book_count'], reverse=True):
+            name = tag['name'][:60] + '...' if len(tag['name']) > 60 else tag['name']
+            table.add_row(name, str(tag['book_count']))
+
+        console.print(table)
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise click.Abort()
+
+
+@main.command('booklore-search')
+@click.argument('query')
+@booklore_options
+@click.option('--limit', default=20, type=int, help='Maximum results')
+def booklore_search(query, db_host, db_port, db_user, db_password, mount_map, limit):
+    """
+    Search BookLore library by title or author.
+
+    Example:
+        book-indexer booklore-search "agentic AI"
+    """
+    try:
+        bl = _booklore_library(db_host, db_port, db_user, _get_bl_password(db_password), mount_map)
+        books = bl.search_books(query, limit=limit)
+
+        if not books:
+            console.print(f"[yellow]No books found matching: {query}[/yellow]")
+            return
+
+        table = Table(title=f"Search Results ({len(books)} found)")
+        table.add_column("ID", style="dim")
+        table.add_column("Title", style="cyan")
+        table.add_column("Author", style="magenta")
+        table.add_column("Formats", style="green")
+        table.add_column("Tags", style="dim")
+
+        for book in books:
+            table.add_row(
+                str(book.id),
+                book.title[:50] + '...' if len(book.title) > 50 else book.title,
+                ', '.join(book.authors)[:30] or 'Unknown',
+                ', '.join(book.formats),
+                ', '.join(book.tags[:3]) + ('...' if len(book.tags) > 3 else ''),
+            )
+
+        console.print(table)
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise click.Abort()
+
+
+@main.command('booklore-sync')
+@click.argument('tag')
+@booklore_options
+@click.option('--host', default='localhost', help='ChromaDB host')
+@click.option('--port', default=8000, type=int, help='ChromaDB port')
+@click.option('--collection', default='books', help='Collection name')
+@click.option('--batch-size', default=50, type=int, help='Chunks per batch')
+@click.option('--force', is_flag=True, help='Force re-indexing')
+@click.option('--dry-run', is_flag=True, help='Show what would be indexed without doing it')
+def booklore_sync(
+    tag, db_host, db_port, db_user, db_password, mount_map,
+    host, port, collection, batch_size, force, dry_run,
+):
+    """
+    Sync all books with a specific BookLore tag to ChromaDB.
+
+    Example:
+        book-indexer booklore-sync "Claude Index" --host opus.centaur-snapper.ts.net
+        book-indexer booklore-sync "To Read" --dry-run
+    """
+    try:
+        bl = _booklore_library(db_host, db_port, db_user, _get_bl_password(db_password), mount_map)
+        books = bl.get_books_by_tag(tag)
+
+        if not books:
+            console.print(f"[yellow]No books found with tag: {tag}[/yellow]")
+            console.print("\n[dim]Tip: Use 'booklore-tags' to see available tags[/dim]")
+            return
+
+        console.print(f"\n[cyan]Found {len(books)} book(s) with tag '{tag}'[/cyan]\n")
+
+        if dry_run:
+            table = Table(title="Books to sync (dry run)")
+            table.add_column("Title", style="cyan")
+            table.add_column("Author", style="magenta")
+            table.add_column("Format", style="green")
+
+            for book in books:
+                best = book.get_best_format()
+                table.add_row(
+                    book.title[:50],
+                    ', '.join(book.authors)[:30] or 'Unknown',
+                    best.suffix if best else '[red]No supported format[/red]',
+                )
+
+            console.print(table)
+            console.print("\n[dim]Run without --dry-run to sync these books[/dim]")
+            return
+
+        indexer = BookIndexer(chroma_host=host, chroma_port=port, collection_name=collection)
+
+        results = {'indexed': [], 'skipped': [], 'errors': []}
+
+        with Progress() as progress:
+            task = progress.add_task("[cyan]Syncing...", total=len(books))
+
+            for book in books:
+                try:
+                    file_path = book.get_best_format()
+
+                    if not file_path:
+                        results['errors'].append({
+                            'title': book.title,
+                            'error': 'No supported format (epub/pdf)',
+                        })
+                        console.print(f"[red]✗[/red] {book.title[:40]} - no supported format")
+                        progress.update(task, advance=1)
+                        continue
+
+                    result = indexer.index_document(file_path, force=force, batch_size=batch_size)
+
+                    if result['status'] == 'indexed':
+                        results['indexed'].append(result)
+                        console.print(f"[green]✓[/green] {book.title[:40]} ({result['chunks']} chunks)")
+                    elif result['status'] == 'skipped':
+                        results['skipped'].append(result)
+                        console.print(f"[yellow]⊘[/yellow] {book.title[:40]} (already indexed)")
+
+                except Exception as e:
+                    results['errors'].append({'title': book.title, 'error': str(e)})
+                    console.print(f"[red]✗[/red] {book.title[:40]}: {e}")
+
+                progress.update(task, advance=1)
+
+        console.print("\n[bold]Sync Summary:[/bold]")
+        console.print(f"  Indexed: [green]{len(results['indexed'])}[/green]")
+        console.print(f"  Skipped: [yellow]{len(results['skipped'])}[/yellow]")
+        console.print(f"  Errors:  [red]{len(results['errors'])}[/red]")
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise click.Abort()
+
+
 if __name__ == '__main__':
     main()
