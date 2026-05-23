@@ -40,3 +40,8 @@ htmlcov/
 # Models cache
 .cache/
 models/
+
+# Environment files
+.env
+.env.local
+.env.*.local
